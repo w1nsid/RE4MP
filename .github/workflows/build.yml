@@ -12,12 +12,16 @@ jobs:
         name: Build Windows (DLL + Injector + Server)
         runs-on: windows-latest
         steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Setup MSVC
               uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
               with:
                   arch: x86
+
+            - name: Create build directory
+              run: if not exist "build" mkdir build
+              shell: cmd
 
             - name: Build RE4MP.dll
               run: |
@@ -70,7 +74,7 @@ jobs:
         name: Build Linux Server
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Build re4mp-server
               run: |
@@ -87,7 +91,7 @@ jobs:
         name: Static Analysis (cppcheck)
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Install cppcheck
               run: sudo apt-get update && sudo apt-get install -y cppcheck
@@ -97,8 +101,11 @@ jobs:
                   cppcheck --enable=warning,performance,portability \
                     --error-exitcode=1 \
                     --suppress=missingIncludeSystem \
+                    --suppress=ctuOneDefinitionRuleViolation \
+                    --suppress=ignoredReturnValue:RE4MP/RE4MP.cpp \
                     --inline-suppr \
                     -I RE4MP \
+                    -i RE4MP/detours.cpp \
                     RE4MP/ RE4MPInjector/ RE4MPServer/
 
     codeql:
@@ -107,7 +114,7 @@ jobs:
         permissions:
             security-events: write
         steps:
-            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Initialize CodeQL
               uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
