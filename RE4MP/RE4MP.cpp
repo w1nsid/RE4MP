@@ -70,7 +70,9 @@ DWORD WINAPI MainThread(LPVOID param) {
 
     // Load config from re4mp.ini next to the DLL
     LoadConfig(&g_config, g_hModule);
-    DbgLog("[RE4MP] Config loaded: ServerIP=%s, ServerPort=%d\n", g_config.serverIP, g_config.serverPort);
+    g_isHost = g_config.isHost;
+    DbgLog("[RE4MP] Config loaded: ServerIP=%s, ServerPort=%d, HostMode=%s\n",
+           g_config.serverIP, g_config.serverPort, g_isHost ? "HOST" : "CLIENT");
 
     // Initialize networking
     if (!InitNetwork(&g_net, &g_config)) {
@@ -140,46 +142,144 @@ DWORD WINAPI MainThread(LPVOID param) {
             f5Held = false;
         }
 
-        // --- Network send: broadcast our Leon's position ---
+        // --- Network send: broadcast our Leon's position + rotation ---
         if (g_net.initialized && playerTwoReady) {
             int* playerPtr = PlayerPointer();
             if (playerPtr) {
                 float* myPos = GetPlayerPosition();
-                if (myPos) {
+                float* myRot = GetCEmRot(playerPtr);
+                if (myPos && myRot) {
                     RE4MPPacket sendPkt;
+                    memset(&sendPkt, 0, sizeof(sendPkt));
                     sendPkt.type = PKT_POSITION;
-                    sendPkt.pos[0] = myPos[0];
-                    sendPkt.pos[1] = myPos[1];
-                    sendPkt.pos[2] = myPos[2];
+                    sendPkt.entityType = ENT_PLAYER;
+                    sendPkt.entityIndex = 0;
+                    sendPkt.pos[0] = myPos[0]; sendPkt.pos[1] = myPos[1]; sendPkt.pos[2] = myPos[2];
+                    sendPkt.rot[0] = myRot[0]; sendPkt.rot[1] = myRot[1]; sendPkt.rot[2] = myRot[2];
+                    sendPkt.hp = -1;
                     SendPacket(&g_net, &sendPkt);
+                }
+            }
+
+            // Send Ashley's position + rotation to remote player
+            int* ashley = SubCharPointer();
+            if (ashley) {
+                __try {
+                    float* ashPos = GetCEmPos(ashley);
+                    float* ashRot = GetCEmRot(ashley);
+                    RE4MPPacket ashPkt;
+                    memset(&ashPkt, 0, sizeof(ashPkt));
+                    ashPkt.type = PKT_ENTITY_STATE;
+                    ashPkt.entityType = ENT_PARTNER;
+                    ashPkt.entityIndex = 0;
+                    ashPkt.pos[0] = ashPos[0]; ashPkt.pos[1] = ashPos[1]; ashPkt.pos[2] = ashPos[2];
+                    ashPkt.rot[0] = ashRot[0]; ashPkt.rot[1] = ashRot[1]; ashPkt.rot[2] = ashRot[2];
+                    ashPkt.hp = -1;
+                    SendPacket(&g_net, &ashPkt);
+                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            }
+
+            // Send enemy + boss entity states
+            // Throttle: only send every 3rd frame to reduce bandwidth
+            static int entitySendFrame = 0;
+            entitySendFrame++;
+            if (g_isHost) {
+                uint32_t emCount = GetEmCount();
+                for (uint32_t i = 0; i < emCount; i++) {
+                    int* em = GetEmByIndex(i);
+                    if (!em || !IsCEmValid(em)) continue;
+
+                    uint8_t id = GetCEmId(em);
+                    bool isBoss = IsBossId(id);
+                    bool isEnemy = IsEnemyId(id);
+
+                    if (!isEnemy && !isBoss) continue;
+
+                    // Bosses send every frame, enemies every 3rd frame
+                    if (!isBoss && (entitySendFrame % 3) != 0) continue;
+
+                    __try {
+                        float* emPos = GetCEmPos(em);
+                        float* emRot = GetCEmRot(em);
+                        RE4MPPacket emPkt;
+                        memset(&emPkt, 0, sizeof(emPkt));
+                        emPkt.type = PKT_ENTITY_STATE;
+                        emPkt.entityType = isBoss ? ENT_BOSS : ENT_ENEMY;
+                        emPkt.entityIndex = (uint16_t)i;
+                        emPkt.pos[0] = emPos[0]; emPkt.pos[1] = emPos[1]; emPkt.pos[2] = emPos[2];
+                        emPkt.rot[0] = emRot[0]; emPkt.rot[1] = emRot[1]; emPkt.rot[2] = emRot[2];
+                        emPkt.hp = GetCEmHP(em);
+                        SendPacket(&g_net, &emPkt);
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 }
             }
         }
 
-        // --- Network recv: apply remote player's position to Ashley ---
+        // --- Network recv: apply remote entity states ---
         if (g_net.initialized) {
             RE4MPPacket recvPkt;
             while (RecvPacket(&g_net, &recvPkt)) {
                 switch (recvPkt.type) {
                 case PKT_POSITION:
+                    // Remote player's Leon position → write to our Ashley (partner)
                     playerTwoPos[0] = recvPkt.pos[0];
                     playerTwoPos[1] = recvPkt.pos[1];
                     playerTwoPos[2] = recvPkt.pos[2];
-                    // Write position directly to Ashley's entity
                     if (playerTwoReady && playerTwoPtr) {
                         __try {
                             float* ashleyPos = GetCEmPos(playerTwoPtr);
                             ashleyPos[0] = recvPkt.pos[0];
                             ashleyPos[1] = recvPkt.pos[1];
                             ashleyPos[2] = recvPkt.pos[2];
+                            float* ashleyRot = GetCEmRot(playerTwoPtr);
+                            ashleyRot[0] = recvPkt.rot[0];
+                            ashleyRot[1] = recvPkt.rot[1];
+                            ashleyRot[2] = recvPkt.rot[2];
                         } __except(EXCEPTION_EXECUTE_HANDLER) {
-                            // Ashley entity became invalid
                             playerTwoReady = false;
                             playerTwoPtr = nullptr;
                         }
                     }
                     break;
 
+                case PKT_ENTITY_STATE:
+                    if (recvPkt.entityType == ENT_PARTNER) {
+                        // Remote player's Ashley position — store for future use
+                        remoteAshleyPos[0] = recvPkt.pos[0];
+                        remoteAshleyPos[1] = recvPkt.pos[1];
+                        remoteAshleyPos[2] = recvPkt.pos[2];
+                    }
+                    else if ((recvPkt.entityType == ENT_ENEMY || recvPkt.entityType == ENT_BOSS) && !g_isHost) {
+                        // Apply enemy/boss state from host
+                        uint32_t idx = recvPkt.entityIndex;
+                        if (idx < GetEmCount()) {
+                            int* em = GetEmByIndex(idx);
+                            if (em && IsCEmValid(em)) {
+                                __try {
+                                    float* emPos = GetCEmPos(em);
+                                    float* emRot = GetCEmRot(em);
+                                    emPos[0] = recvPkt.pos[0]; emPos[1] = recvPkt.pos[1]; emPos[2] = recvPkt.pos[2];
+                                    emRot[0] = recvPkt.rot[0]; emRot[1] = recvPkt.rot[1]; emRot[2] = recvPkt.rot[2];
+                                    if (recvPkt.hp >= 0) {
+                                        *(int16_t*)((DWORD)em + 0x324) = recvPkt.hp;
+                                    }
+                                } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                            }
+                        }
+                    }
+                    break;
+
+                case PKT_ENTITY_DEATH:
+                    // Remote notified an entity was killed
+                    if (!g_isHost && recvPkt.entityIndex < GetEmCount()) {
+                        int* em = GetEmByIndex(recvPkt.entityIndex);
+                        if (em && IsCEmValid(em)) {
+                            __try {
+                                *(int16_t*)((DWORD)em + 0x324) = 0; // set HP to 0
+                            } __except(EXCEPTION_EXECUTE_HANDLER) {}
+                        }
+                    }
+                    break;
                 }
             }
         }

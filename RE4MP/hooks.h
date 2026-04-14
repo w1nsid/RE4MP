@@ -35,6 +35,99 @@ float* GetCEmPos(int* cEmAddr)
     return (float*)((DWORD)cEmAddr + 0x94);
 }
 
+float* GetCEmRot(int* cEmAddr)
+{
+    return (float*)((DWORD)cEmAddr + 0xA0);  // cCoord::ang_A0
+}
+
+int16_t GetCEmHP(int* cEmAddr)
+{
+    return *(int16_t*)((DWORD)cEmAddr + 0x324);  // cEm::hp_324
+}
+
+uint8_t GetCEmId(int* cEmAddr)
+{
+    return *(uint8_t*)((DWORD)cEmAddr + 0x100);  // cModel::id_100
+}
+
+uint8_t GetCEmListIndex(int* cEmAddr)
+{
+    return *(uint8_t*)((DWORD)cEmAddr + 0x3A0);  // cEm::emListIndex_3A0
+}
+
+bool IsCEmValid(int* cEmAddr)
+{
+    uint32_t flags = *(uint32_t*)((DWORD)cEmAddr + 0x4);  // cUnit::be_flag_4
+    return (flags & 0x601) != 0;
+}
+
+// Entity type classification matching re4_tweaks IsEnemy/IsGanado
+bool IsEnemyId(uint8_t id)
+{
+    // Blacklist non-enemy objects that fall in the enemy ID range
+    if (id == 0x2A) return false;  // Mine/bear trap
+    if (id == 0x3B) return false;  // Truck/Wagon
+    if (id == 0x3D) return false;  // Mike's helicopter
+    if (id == 0x4E) return false;  // SW Ship cannon
+    return (id > 0x10 && id < 0x4F);
+}
+
+bool IsBossId(uint8_t id)
+{
+    // Boss entity IDs (chapter bosses, mini-bosses)
+    switch (id) {
+        case 0x22: // Del Lago
+        case 0x23: // El Gigante
+        case 0x24: // El Gigante (variant)
+        case 0x30: // Garrador
+        case 0x31: // Garrador (armored)
+        case 0x32: // Verdugo
+        case 0x33: // Pesanta / U-3
+        case 0x34: // Salazar statue
+        case 0x39: // Krauser (mutant)
+        case 0x3A: // Saddler
+        case 0x3E: // It (U-3 second form)
+        case 0x42: // Krauser (human)
+        case 0x46: // Mendez
+        case 0x47: // Mendez (mutant)
+            return true;
+        default:
+            return false;
+    }
+}
+
+// --- Entity Manager iteration ---
+// cEmMgr layout (from re4_tweaks SDK/cManager.h):
+//   +0x04: T* m_Array_4        (raw entity block)
+//   +0x08: uint32_t m_nArray_8 (total entity slots)
+//   +0x0C: uint32_t m_blockSize_C (bytes per entity, 0x408 for cEm)
+//   +0x14: T* m_pAlive_14      (linked list head)
+//   +0x18: T* m_pAliveBack_18  (linked list tail)
+
+// Get entity count from EmMgr
+uint32_t GetEmCount()
+{
+    if (!g_pEmMgr) return 0;
+    return *(uint32_t*)((DWORD)g_pEmMgr + 0x08);
+}
+
+// Get entity block size from EmMgr
+uint32_t GetEmBlockSize()
+{
+    if (!g_pEmMgr) return 0x408; // default cEm size
+    return *(uint32_t*)((DWORD)g_pEmMgr + 0x0C);
+}
+
+// Get entity by array index
+int* GetEmByIndex(uint32_t idx)
+{
+    if (!g_pEmMgr) return NULL;
+    int* array = *(int**)((DWORD)g_pEmMgr + 0x04);
+    if (!array) return NULL;
+    uint32_t blockSize = GetEmBlockSize();
+    return (int*)((uint8_t*)array + idx * blockSize);
+}
+
 int* SubCharPointer()
 {
     if (!g_pAS || !*g_pAS) return NULL;

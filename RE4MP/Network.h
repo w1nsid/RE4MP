@@ -7,15 +7,26 @@
 #pragma comment(lib, "ws2_32.lib")
 
 // Packet types
-#define PKT_POSITION  0
-#define PKT_SHOOT     1  // reserved
-#define PKT_SPAWN     2  // reserved
+#define PKT_POSITION      0  // Leon position + rotation
+#define PKT_ENTITY_STATE  1  // Entity position + rotation (partner/enemy/boss)
+#define PKT_ENTITY_DEATH  2  // Entity killed notification
+#define PKT_MAX           2  // highest valid packet type
+
+// Entity types (used in entityType field)
+#define ENT_PLAYER   0  // Leon (the local player)
+#define ENT_PARTNER  1  // Ashley / partner character
+#define ENT_ENEMY    2  // Ganado / standard enemy
+#define ENT_BOSS     3  // Boss entity
 
 #pragma pack(push, 1)
 struct RE4MPPacket {
-    uint8_t  type;
-    float    pos[3];
-    uint32_t seq;
+    uint8_t  type;        // PKT_* packet type
+    uint8_t  entityType;  // ENT_* entity classification
+    uint16_t entityIndex; // emListIndex or array slot (identifies which entity)
+    float    pos[3];      // x, y, z position (cCoord::pos_94)
+    float    rot[3];      // pitch, yaw, roll rotation (cCoord::ang_A0)
+    int16_t  hp;          // entity HP (cEm::hp_324), -1 if unused
+    uint32_t seq;         // sequence number
 };
 #pragma pack(pop)
 
@@ -97,7 +108,7 @@ inline bool RecvPacket(RE4MPNetwork* net, RE4MPPacket* pkt)
 
     if (result == sizeof(RE4MPPacket)) {
         // Validate packet type
-        if (pkt->type > PKT_SPAWN)
+        if (pkt->type > PKT_MAX)
             return false;
 
         // Drop stale out-of-order packets (but allow seq wraparound)

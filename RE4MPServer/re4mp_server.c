@@ -41,14 +41,19 @@
 #pragma pack(push, 1)
 struct RE4MPPacket {
     uint8_t  type;
+    uint8_t  entityType;
+    uint16_t entityIndex;
     float    pos[3];
+    float    rot[3];
+    int16_t  hp;
     uint32_t seq;
 };
 #pragma pack(pop)
 
-#define PKT_POSITION 0
-#define PKT_SHOOT    1
-#define PKT_SPAWN    2
+#define PKT_POSITION      0
+#define PKT_ENTITY_STATE  1
+#define PKT_ENTITY_DEATH  2
+#define PKT_MAX           2
 
 #define MAX_CLIENTS        2
 #define CLIENT_TIMEOUT_SEC 30
@@ -177,7 +182,7 @@ int main(int argc, char* argv[])
         }
 
         /* Validate packet type */
-        if (pkt.type > PKT_SPAWN) {
+        if (pkt.type > PKT_MAX) {
             continue;
         }
 
