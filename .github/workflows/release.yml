@@ -1,0 +1,128 @@
+name: Release RE4MP
+
+on:
+    push:
+        tags:
+            - "v*"
+
+permissions:
+    contents: write
+
+jobs:
+    build-windows:
+        name: Build Windows
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Setup MSVC
+              uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+              with:
+                  arch: x86
+
+            - name: Create build directory
+              run: if not exist "build" mkdir build
+              shell: cmd
+
+            - name: Build RE4MP.dll
+              run: |
+                  cl.exe /nologo /EHsc /W3 /WX /O2 /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_WINDLL" /I "RE4MP" ^
+                    /Fo"build\\" ^
+                    RE4MP\RE4MP.cpp RE4MP\detours.cpp ^
+                    /link /DLL /OUT:"build\RE4MP.dll" ^
+                    "RE4MP\lib\detours.lib" ws2_32.lib kernel32.lib user32.lib advapi32.lib
+              shell: cmd
+
+            - name: Build RE4MPInjector.exe
+              run: |
+                  cl.exe /nologo /EHsc /W3 /WX /O2 /D "WIN32" /D "NDEBUG" /D "_CONSOLE" ^
+                    /Fo"build\\" ^
+                    RE4MPInjector\RE4MPInjector.cpp ^
+                    /link /OUT:"build\RE4MPInjector.exe" ^
+                    kernel32.lib user32.lib advapi32.lib
+              shell: cmd
+
+            - name: Build RE4MPServer.exe
+              run: |
+                  cl.exe /nologo /O2 /W3 /WX /D "WIN32" ^
+                    /Fo"build\\" ^
+                    RE4MPServer\re4mp_server.c ^
+                    /link /OUT:"build\RE4MPServer.exe" ^
+                    ws2_32.lib
+              shell: cmd
+
+            - name: Copy config
+              run: copy re4mp.ini build\re4mp.ini
+              shell: cmd
+
+            - name: Package client zip
+              run: Compress-Archive -Path build\RE4MP.dll, build\RE4MPInjector.exe, build\re4mp.ini -DestinationPath build\RE4MP-client.zip
+              shell: pwsh
+
+            - name: Upload artifacts
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: windows-artifacts
+                  path: |
+                      build/RE4MP-client.zip
+                      build/RE4MPServer.exe
+
+    build-linux-server:
+        name: Build Linux Server
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Build re4mp-server
+              run: |
+                  cd RE4MPServer
+                  make CFLAGS="-O2 -Wall -Wextra -Werror"
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: linux-artifacts
+                  path: RE4MPServer/re4mp-server
+
+    release:
+        name: Create Release
+        needs: [build-windows, build-linux-server]
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Download all artifacts
+              uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+              with:
+                  path: artifacts
+
+            - name: Prepare release files
+              run: |
+                  mkdir -p release
+                  cp artifacts/windows-artifacts/build/RE4MP-client.zip release/RE4MP-${{ github.ref_name }}.zip
+                  cp artifacts/windows-artifacts/build/RE4MPServer.exe release/RE4MPServer.exe
+                  cp artifacts/linux-artifacts/re4mp-server release/re4mp-server
+                  chmod +x release/re4mp-server
+
+            - name: Detect pre-release
+              id: prerelease
+              run: |
+                  TAG="${{ github.ref_name }}"
+                  # v1.0.0 = release, v1.0.0-anything = pre-release
+                  if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                    echo "flag=" >> $GITHUB_OUTPUT
+                  else
+                    echo "flag=--prerelease" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Create GitHub Release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  gh release create "${{ github.ref_name }}" \
+                    ${{ steps.prerelease.outputs.flag }} \
+                    --title "${{ github.ref_name }}" \
+                    --generate-notes \
+                    release/RE4MP-${{ github.ref_name }}.zip \
+                    release/RE4MPServer.exe \
+                    release/re4mp-server

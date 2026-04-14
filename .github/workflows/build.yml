@@ -1,0 +1,130 @@
+name: Build RE4MP
+
+on:
+    pull_request:
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    build-windows:
+        name: Build Windows (DLL + Injector + Server)
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Setup MSVC
+              uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+              with:
+                  arch: x86
+
+            - name: Create build directory
+              run: if not exist "build" mkdir build
+              shell: cmd
+
+            - name: Build RE4MP.dll
+              run: |
+                  cl.exe /nologo /EHsc /W3 /WX /O2 /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_WINDLL" /I "RE4MP" ^
+                    /Fo"build\\" ^
+                    RE4MP\RE4MP.cpp RE4MP\detours.cpp ^
+                    /link /DLL /OUT:"build\RE4MP.dll" ^
+                    "RE4MP\lib\detours.lib" ws2_32.lib kernel32.lib user32.lib advapi32.lib
+              shell: cmd
+
+            - name: Build RE4MPInjector.exe
+              run: |
+                  cl.exe /nologo /EHsc /W3 /WX /O2 /D "WIN32" /D "NDEBUG" /D "_CONSOLE" ^
+                    /Fo"build\\" ^
+                    RE4MPInjector\RE4MPInjector.cpp ^
+                    /link /OUT:"build\RE4MPInjector.exe" ^
+                    kernel32.lib user32.lib advapi32.lib
+              shell: cmd
+
+            - name: Build RE4MPServer.exe
+              run: |
+                  cl.exe /nologo /O2 /W3 /WX /D "WIN32" ^
+                    /Fo"build\\" ^
+                    RE4MPServer\re4mp_server.c ^
+                    /link /OUT:"build\RE4MPServer.exe" ^
+                    ws2_32.lib
+              shell: cmd
+
+            - name: Copy config
+              run: copy re4mp.ini build\re4mp.ini
+              shell: cmd
+
+            - name: Package client zip
+              run: Compress-Archive -Path build\RE4MP.dll, build\RE4MPInjector.exe, build\re4mp.ini -DestinationPath build\RE4MP-client.zip
+              shell: pwsh
+
+            - name: Upload client zip
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: RE4MP-client-windows
+                  path: build/RE4MP-client.zip
+
+            - name: Upload server exe
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: RE4MP-server-windows
+                  path: build/RE4MPServer.exe
+
+    build-linux-server:
+        name: Build Linux Server
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Build re4mp-server
+              run: |
+                  cd RE4MPServer
+                  make CFLAGS="-O2 -Wall -Wextra -Werror"
+
+            - name: Upload server binary
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+              with:
+                  name: RE4MP-server-linux
+                  path: RE4MPServer/re4mp-server
+
+    static-analysis:
+        name: Static Analysis (cppcheck)
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Install cppcheck
+              run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+            - name: Run cppcheck
+              run: |
+                  cppcheck --enable=warning,performance,portability \
+                    --error-exitcode=1 \
+                    --suppress=missingIncludeSystem \
+                    --suppress=ctuOneDefinitionRuleViolation \
+                    --suppress=ignoredReturnValue:RE4MP/RE4MP.cpp \
+                    --inline-suppr \
+                    -I RE4MP \
+                    -i RE4MP/detours.cpp \
+                    RE4MP/ RE4MPInjector/ RE4MPServer/
+
+    codeql:
+        name: CodeQL Security Scan
+        runs-on: ubuntu-latest
+        permissions:
+            security-events: write
+        steps:
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Initialize CodeQL
+              uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+              with:
+                  languages: cpp
+
+            - name: Build for analysis
+              run: |
+                  cd RE4MPServer
+                  gcc -O2 -Wall -Wextra -o re4mp-server re4mp_server.c
+
+            - name: Perform CodeQL Analysis
+              uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
