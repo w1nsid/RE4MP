@@ -120,6 +120,11 @@ RE4MPServer/                  Dedicated relay server
 
 Client logs are written to `re4mp.log` next to the DLL.
 
+## Credits
+
+- [Grep5268/RE4MP](https://github.com/Grep5268/RE4MP) — original multiplayer mod this project is forked from
+- [nipkownix/re4_tweaks](https://github.com/nipkownix/re4_tweaks) — RE4 SDK (game structs, signature patterns)
+
 ## License
 
-This project is for educational and personal use. Resident Evil 4 is a trademark of Capcom.
+This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You must give appropriate credit and open-source any derivative work under the same license. Resident Evil 4 is a trademark of Capcom.
