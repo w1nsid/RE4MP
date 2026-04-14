@@ -8,6 +8,8 @@ DWORD base_addr;
 int* playerTwoPtr = nullptr;
 bool playerTwoReady = false;
 float* playerTwoPos = new float[3] {5000.0f, 50.0f, -3914.870605f};
+float* playerTwoAng = new float[3] {0.0f, 0.0f, 0.0f};
+bool   playerTwoWasActive = false; // tracks if clone was ever spawned (for auto-respawn)
 
 // networking
 RE4MPConfig g_config;

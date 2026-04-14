@@ -15,6 +15,7 @@
 struct RE4MPPacket {
     uint8_t  type;
     float    pos[3];
+    float    ang[3];
     uint32_t seq;
 };
 #pragma pack(pop)

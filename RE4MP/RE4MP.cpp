@@ -82,57 +82,70 @@ DWORD WINAPI MainThread(LPVOID param) {
 
     DbgLog("[RE4MP] Entering main loop\n");
     bool f5Held = false;
+    DWORD lastAutoSpawn = 0;
 
     while (true) {
 
-        // Force Ashley to be present in every area (sets STA_SUB_ASHLEY flag each frame)
-        ForceAshleyPresent();
-
-        // Auto-acquire Ashley pointer if she became available after a room transition
-        if (playerTwoReady && !SubCharPointer()) {
-            DbgLog("[RE4MP] Ashley lost (room transition?) — waiting for reload\n");
-            playerTwoReady = false;
-            playerTwoPtr = nullptr;
-        }
-        if (!playerTwoReady) {
-            int* ashley = SubCharPointer();
-            if (ashley) {
-                playerTwoPtr = ashley;
-                if (!g_detoursAttached) {
-                    AttachDetours();
+        // --- Leon clone validity check (room transition / death) ---
+        if (playerTwoReady && playerTwoPtr) {
+            __try {
+                if (!IsCEmValid(playerTwoPtr)) {
+                    DbgLog("[RE4MP] Leon clone lost (room transition or death)\n");
+                    playerTwoReady = false;
+                    playerTwoPtr = nullptr;
                 }
-                playerTwoReady = true;
-                DbgLog("[RE4MP] Ashley auto-acquired at 0x%p — partner ready!\n", ashley);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                playerTwoReady = false;
+                playerTwoPtr = nullptr;
             }
         }
 
-        // F5: Activate partner (use existing Ashley entity — no createBack needed)
+        // --- Auto-respawn Leon clone after room transition ---
+        if (g_net.initialized && !playerTwoReady && playerTwoWasActive && EmSetEvent) {
+            DWORD now = GetTickCount();
+            if (now - lastAutoSpawn > 2000) {
+                lastAutoSpawn = now;
+                float* myPos = GetPlayerPosition();
+                if (myPos) {
+                    __try {
+                        int* clone = SpawnLeonClone(myPos);
+                        if (clone) {
+                            playerTwoPtr = clone;
+                            if (!g_detoursAttached) AttachDetours();
+                            playerTwoReady = true;
+                            DbgLog("[RE4MP] Leon clone auto-respawned\n");
+                        }
+                    } __except(EXCEPTION_EXECUTE_HANDLER) {
+                        DbgLog("[RE4MP] Auto-respawn crashed\n");
+                    }
+                }
+            }
+        }
+
+        // F5: Spawn Leon clone (first time or manual respawn)
         if (GetAsyncKeyState(VK_F5) & 0x8000) {
             if (!f5Held) {
                 f5Held = true;
                 if (playerTwoReady) {
-                    DbgLog("[RE4MP] F5 pressed — partner already active\n");
+                    DbgLog("[RE4MP] F5 pressed — Leon clone already active\n");
                 } else {
-                    DbgLog("[RE4MP] F5 pressed — activating partner\n");
-                    int* ashley = SubCharPointer();
-                    DbgLog("[RE4MP]   Ashley (SubChar) pointer: 0x%p\n", ashley);
-                    if (ashley) {
-                        playerTwoPtr = ashley;
-                        DbgLog("[RE4MP]   Using Ashley entity at 0x%p\n", playerTwoPtr);
+                    DbgLog("[RE4MP] F5 pressed — spawning Leon clone\n");
+                    float* myPos = GetPlayerPosition();
+                    if (myPos) {
                         __try {
-                            float* pos = GetCEmPos(playerTwoPtr);
-                            DbgLog("[RE4MP]   Entity pos: %.1f, %.1f, %.1f\n", pos[0], pos[1], pos[2]);
-                            DbgLog("[RE4MP]   Attaching detour hooks...\n");
-                            AttachDetours();
-                            DbgLog("[RE4MP]   Detours attached\n");
-                            playerTwoReady = true;
-                            DbgLog("[RE4MP]   Partner ready!\n");
+                            int* clone = SpawnLeonClone(myPos);
+                            if (clone) {
+                                playerTwoPtr = clone;
+                                if (!g_detoursAttached) AttachDetours();
+                                playerTwoReady = true;
+                                playerTwoWasActive = true;
+                                DbgLog("[RE4MP] Leon clone ready!\n");
+                            }
                         } __except(EXCEPTION_EXECUTE_HANDLER) {
-                            DbgLog("[RE4MP]   CRASH reading Ashley entity! code=0x%08X\n", GetExceptionCode());
-                            playerTwoPtr = nullptr;
+                            DbgLog("[RE4MP] CRASH spawning Leon clone! code=0x%08X\n", GetExceptionCode());
                         }
                     } else {
-                        DbgLog("[RE4MP]   ERROR: Ashley/SubChar not present in this area\n");
+                        DbgLog("[RE4MP] Cannot spawn — player pointer not ready\n");
                     }
                 }
             }
@@ -140,17 +153,22 @@ DWORD WINAPI MainThread(LPVOID param) {
             f5Held = false;
         }
 
-        // --- Network send: broadcast our Leon's position ---
+        // --- Network send: broadcast our Leon's position + rotation ---
         if (g_net.initialized && playerTwoReady) {
             int* playerPtr = PlayerPointer();
             if (playerPtr) {
                 float* myPos = GetPlayerPosition();
-                if (myPos) {
+                float* myAng = GetCEmAng(playerPtr);
+                if (myPos && myAng) {
                     RE4MPPacket sendPkt;
+                    memset(&sendPkt, 0, sizeof(sendPkt));
                     sendPkt.type = PKT_POSITION;
                     sendPkt.pos[0] = myPos[0];
                     sendPkt.pos[1] = myPos[1];
                     sendPkt.pos[2] = myPos[2];
+                    sendPkt.ang[0] = myAng[0];
+                    sendPkt.ang[1] = myAng[1];
+                    sendPkt.ang[2] = myAng[2];
                     SendPacket(&g_net, &sendPkt);
                 }
             }
@@ -165,15 +183,21 @@ DWORD WINAPI MainThread(LPVOID param) {
                     playerTwoPos[0] = recvPkt.pos[0];
                     playerTwoPos[1] = recvPkt.pos[1];
                     playerTwoPos[2] = recvPkt.pos[2];
-                    // Write position directly to Ashley's entity
+                    playerTwoAng[0] = recvPkt.ang[0];
+                    playerTwoAng[1] = recvPkt.ang[1];
+                    playerTwoAng[2] = recvPkt.ang[2];
+                    // Write position + rotation to Leon clone entity
                     if (playerTwoReady && playerTwoPtr) {
                         __try {
-                            float* ashleyPos = GetCEmPos(playerTwoPtr);
-                            ashleyPos[0] = recvPkt.pos[0];
-                            ashleyPos[1] = recvPkt.pos[1];
-                            ashleyPos[2] = recvPkt.pos[2];
+                            float* clonePos = GetCEmPos(playerTwoPtr);
+                            float* cloneAng = GetCEmAng(playerTwoPtr);
+                            clonePos[0] = recvPkt.pos[0];
+                            clonePos[1] = recvPkt.pos[1];
+                            clonePos[2] = recvPkt.pos[2];
+                            cloneAng[0] = recvPkt.ang[0];
+                            cloneAng[1] = recvPkt.ang[1];
+                            cloneAng[2] = recvPkt.ang[2];
                         } __except(EXCEPTION_EXECUTE_HANDLER) {
-                            // Ashley entity became invalid
                             playerTwoReady = false;
                             playerTwoPtr = nullptr;
                         }

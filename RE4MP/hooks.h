@@ -1,10 +1,36 @@
 #pragma once
 #include "SigScan.h"
 
+// --- ESL spawning types (from RE4 SDK) ---
+
+#pragma pack(push, 1)
+struct SVEC { int16_t x, y, z; };
+
+struct EM_LIST {
+    uint8_t  be_flag_0;
+    char     id_1;
+    char     type_2;
+    char     set_3;
+    uint32_t flag_4;
+    int16_t  hp_8;
+    uint8_t  emset_no_A;
+    char     Character_B;
+    SVEC     s_pos_C;
+    SVEC     s_ang_12;
+    uint16_t room_18;
+    int16_t  Guard_r_1A;
+    uint16_t percentageMotionSpeed_1C;
+    uint16_t percentageScale_1E;
+};
+#pragma pack(pop)
+
 // --- Function typedefs ---
 
 typedef BOOL(__cdecl* fn_RouteCkToPos)(void* cEm, float* pPos, float* pDest, uint32_t mode, float* pMax);
 fn_RouteCkToPos RouteCkToPos;
+
+typedef int* (__cdecl* fn_EmSetEvent)(EM_LIST* emList);
+fn_EmSetEvent EmSetEvent = NULL;
 
 // --- Resolved global pointers (set by SigScanResolve) ---
 static int**   g_pPL  = NULL;   // -> cPlayer* (Leon)
@@ -33,6 +59,24 @@ float* GetPlayerPosition()
 float* GetCEmPos(int* cEmAddr)
 {
     return (float*)((DWORD)cEmAddr + 0x94);
+}
+
+float* GetCEmAng(int* cEmAddr)
+{
+    return (float*)((DWORD)cEmAddr + 0xA0);
+}
+
+bool IsCEmValid(int* cEmAddr)
+{
+    if (!cEmAddr) return false;
+    uint32_t flags = *(uint32_t*)((DWORD)cEmAddr + 0x04);
+    return (flags & 0x601) != 0;
+}
+
+uint16_t GetCurrentRoom()
+{
+    if (!g_pGlobalWK) return 0;
+    return *(uint16_t*)((uint8_t*)g_pGlobalWK + 0x4FAC);
 }
 
 int* SubCharPointer()
@@ -112,10 +156,69 @@ bool SigScanResolve()
         }
     } while(0);
 
+    // --- EmSetEvent: caller pattern → two-level CALL resolution ---
+    SIG_FIND(EmSetEvent, "52 66 89 45 E4 66 89 4D F6 E8")
+        if (_m) {
+            uint8_t* thunk = SigResolveCall(_m, 9);
+            if (thunk && (thunk[0] == 0xE8 || thunk[0] == 0xE9)) {
+                uint8_t* fn = SigResolveCall(thunk, 0);
+                EmSetEvent = (fn_EmSetEvent)fn;
+                DbgLog("[SIG]     -> thunk 0x%08X, fn 0x%08X\n", (DWORD)thunk, (DWORD)fn);
+            } else if (thunk) {
+                // Thunk might have a short prologue before the CALL — scan first 32 bytes
+                for (int i = 0; i < 32; i++) {
+                    if (thunk[i] == 0xE8) {
+                        uint8_t* fn = SigResolveCall(thunk, i);
+                        EmSetEvent = (fn_EmSetEvent)fn;
+                        DbgLog("[SIG]     -> thunk 0x%08X +%d, fn 0x%08X\n", (DWORD)thunk, i, (DWORD)fn);
+                        break;
+                    }
+                }
+            }
+        }
+    } while(0);
+
     DbgLog("[SIG] Resolved %d / %d signatures\n", found, total);
 
     g_sigsResolved = (g_pPL != NULL && g_pEmMgr != NULL && g_pGlobalWK != NULL);
     return g_sigsResolved;
+}
+
+// Spawn a Leon clone entity via the ESL system
+int* SpawnLeonClone(float* spawnPos)
+{
+    if (!EmSetEvent) {
+        DbgLog("[RE4MP] EmSetEvent not resolved — cannot spawn Leon clone\n");
+        return NULL;
+    }
+
+    EM_LIST entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.be_flag_0 = 0x03;    // ALIVE | SET
+    entry.id_1      = 0x02;    // Leon
+    entry.type_2    = 0;
+    entry.hp_8      = 10000;   // high HP
+    entry.room_18   = GetCurrentRoom();
+
+    if (spawnPos) {
+        entry.s_pos_C.x = (int16_t)spawnPos[0];
+        entry.s_pos_C.y = (int16_t)spawnPos[1];
+        entry.s_pos_C.z = (int16_t)spawnPos[2];
+    }
+
+    DbgLog("[RE4MP] EmSetEvent(id=0x02 room=%d pos=%.0f,%.0f,%.0f)\n",
+           entry.room_18,
+           spawnPos ? spawnPos[0] : 0.f,
+           spawnPos ? spawnPos[1] : 0.f,
+           spawnPos ? spawnPos[2] : 0.f);
+
+    int* entity = EmSetEvent(&entry);
+    if (entity)
+        DbgLog("[RE4MP] Leon clone spawned at 0x%p\n", entity);
+    else
+        DbgLog("[RE4MP] EmSetEvent returned NULL\n");
+
+    return entity;
 }
 
 // Fallback: use hardcoded v1.0.6 offsets if sigs fail
