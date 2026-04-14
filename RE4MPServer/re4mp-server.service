@@ -1,0 +1,15 @@
+[Unit]
+Description=RE4MP Dedicated Relay Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/re4mp-server 27015
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,16 +1,11 @@
 #pragma once
-#include <Windows.h>
 #include "Cache.h"
 
-void HookFunctions(DWORD base_address);
+void HookFunctions(DWORD base_addr);
 void CodeInjection(DWORD base_addr);
 
-int* GetEmMgrPointer(DWORD base_addr);
-int* GetEmMgrEmListPointer(DWORD base_addr);
-int* PlayerPointer(DWORD base_addr);
-float* GetPlayerPosition(DWORD base_addr);
-
-int* SubCharPointer(DWORD base_addr);
-float* GetSubCharPos(DWORD base_addr);
-float* GetSubCharDestinationPos(DWORD base_addr);
-void MoveSubChar(DWORD base_addr, float* toPos);
+int* PlayerPointer();
+float* GetPlayerPosition();
+float* GetCEmPos(int* cEmAddr);
+int* SubCharPointer();
+void ForceAshleyPresent();
