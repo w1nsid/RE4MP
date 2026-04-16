@@ -62,7 +62,8 @@ struct RE4MPPacket {
 #define PKT_ENTITY_DEATH  2
 #define PKT_ROOM_SYNC     3
 #define PKT_HP_DAMAGE     4
-#define PKT_MAX           4
+#define PKT_PAUSE_SYNC    5
+#define PKT_MAX           5
 
 #define MAX_CLIENTS        2
 #define CLIENT_TIMEOUT_SEC 30

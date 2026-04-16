@@ -64,10 +64,6 @@ DWORD WINAPI MainThread(LPVOID param) {
     DetourFunctions(base_addr);
     DbgLog(" addresses saved (hooks deferred until spawn)\n");
 
-    DbgLog("[RE4MP] Applying code injection...\n");
-    CodeInjection(base_addr);
-    DbgLog("[RE4MP] CodeInjection done\n");
-
     // Load config from re4mp.ini next to the DLL
     LoadConfig(&g_config, g_hModule);
     g_isHost = g_config.isHost;
@@ -82,8 +78,9 @@ DWORD WINAPI MainThread(LPVOID param) {
         DbgLog("[RE4MP] Network initialized, connected to %s:%d\n", g_config.serverIP, g_config.serverPort);
     }
 
-    DbgLog("[RE4MP] Entering main loop\n");
+    DbgLog("[RE4MP] Entering main loop — press F5 to start sync\n");
     bool f5Held = false;
+    bool loopActive = false;
 
     // Entity sync state (static to avoid large stack allocation)
     static EntitySyncState syncState;
@@ -91,11 +88,66 @@ DWORD WINAPI MainThread(LPVOID param) {
 
     uint16_t prevRoom = 0;
     bool firstRoomRead = true;
+    uint32_t prevPauseFlags = 0;
 
     while (true) {
 
-        // Force Ashley to be present in every area (sets STA_SUB_ASHLEY flag each frame)
-        ForceAshleyPresent();
+        // F5: Start the sync loop
+        if (GetAsyncKeyState(VK_F5) & 0x8000) {
+            if (!f5Held) {
+                f5Held = true;
+                if (!loopActive) {
+                    loopActive = true;
+                    DbgLog("[RE4MP] F5 pressed — sync loop activated\n");
+                } else {
+                    DbgLog("[RE4MP] F5 pressed — sync loop already active\n");
+                }
+            }
+        } else {
+            f5Held = false;
+        }
+
+        // Nothing else runs until F5 activates the loop
+        if (!loopActive) {
+            if (GetAsyncKeyState(VK_END) & 0x8000) {
+                DbgLog("[RE4MP] END pressed — unloading\n");
+                break;
+            }
+            Sleep(1);
+            continue;
+        }
+
+        // Skip ALL game memory access while not in MainLoop.
+        // During room transitions, entity pointers (player, Ashley, enemies)
+        // are invalid — accessing them causes crashes.
+        if (!IsGameStable()) {
+            // Still process network recv so we don't lose packets
+            if (g_net.initialized) {
+                RE4MPPacket recvPkt;
+                while (RecvPacket(&g_net, &recvPkt)) {
+                    switch (recvPkt.type) {
+                    case PKT_ROOM_SYNC:
+                        syncState.remoteRoom = recvPkt.entityIndex;
+                        syncState.remoteRoomKnown = true;
+                        break;
+                    case PKT_PAUSE_SYNC:
+                    {
+                        uint32_t remotePause = ((uint32_t)(uint16_t)recvPkt.hp << 16)
+                                             | (uint32_t)recvPkt.entityIndex;
+                        SetPauseFlags(remotePause);
+                        prevPauseFlags = remotePause;
+                        break;
+                    }
+                    default:
+                        break; // Discard entity packets during transition
+                    }
+                }
+            }
+            Sleep(10);
+            continue;
+        }
+
+        // ===== From here on, game is in MainLoop — all pointers are safe =====
 
         // Auto-acquire Ashley pointer if she became available after a room transition
         if (playerTwoReady && !SubCharPointer()) {
@@ -115,40 +167,6 @@ DWORD WINAPI MainThread(LPVOID param) {
             }
         }
 
-        // F5: Activate partner (use existing Ashley entity — no createBack needed)
-        if (GetAsyncKeyState(VK_F5) & 0x8000) {
-            if (!f5Held) {
-                f5Held = true;
-                if (playerTwoReady) {
-                    DbgLog("[RE4MP] F5 pressed — partner already active\n");
-                } else {
-                    DbgLog("[RE4MP] F5 pressed — activating partner\n");
-                    int* ashley = SubCharPointer();
-                    DbgLog("[RE4MP]   Ashley (SubChar) pointer: 0x%p\n", ashley);
-                    if (ashley) {
-                        playerTwoPtr = ashley;
-                        DbgLog("[RE4MP]   Using Ashley entity at 0x%p\n", playerTwoPtr);
-                        __try {
-                            float* pos = GetCEmPos(playerTwoPtr);
-                            DbgLog("[RE4MP]   Entity pos: %.1f, %.1f, %.1f\n", pos[0], pos[1], pos[2]);
-                            DbgLog("[RE4MP]   Attaching detour hooks...\n");
-                            AttachDetours();
-                            DbgLog("[RE4MP]   Detours attached\n");
-                            playerTwoReady = true;
-                            DbgLog("[RE4MP]   Partner ready!\n");
-                        } __except(EXCEPTION_EXECUTE_HANDLER) {
-                            DbgLog("[RE4MP]   CRASH reading Ashley entity! code=0x%08X\n", GetExceptionCode());
-                            playerTwoPtr = nullptr;
-                        }
-                    } else {
-                        DbgLog("[RE4MP]   ERROR: Ashley/SubChar not present in this area\n");
-                    }
-                }
-            }
-        } else {
-            f5Held = false;
-        }
-
         // =====================================================
         //  Room tracking — detect transitions, reset sync state
         // =====================================================
@@ -162,13 +180,22 @@ DWORD WINAPI MainThread(LPVOID param) {
         prevRoom = currentRoom;
         firstRoomRead = false;
 
+        // Force Ashley to be present in every area (sets STA_SUB_ASHLEY flag each frame)
+        // Must be after IsGameStable() — GLOBAL_WK fields are unreliable during transitions.
+        ForceAshleyPresent();
+
+        // Prevent enemy AI from targeting Ashley for pickup (fixes desync)
+        // Must be after IsGameStable() — iterates entity array which is invalid during loads.
+        DisableEnemyAshleyPickup();
+
         // =====================================================
         //  Network SEND
         // =====================================================
         if (g_net.initialized) {
 
-            // --- Room sync (throttled, always sent) ---
             DWORD now = GetTickCount();
+
+            // --- Room sync (throttled, informational — tells remote what room we're in) ---
             if (now - syncState.lastRoomSyncSend >= ROOM_SYNC_INTERVAL_MS) {
                 RE4MPPacket roomPkt;
                 memset(&roomPkt, 0, sizeof(roomPkt));
@@ -176,6 +203,18 @@ DWORD WINAPI MainThread(LPVOID param) {
                 roomPkt.entityIndex = currentRoom;
                 SendPacket(&g_net, &roomPkt);
                 syncState.lastRoomSyncSend = now;
+            }
+
+            // --- Pause sync (send when changed) ---
+            uint32_t curPauseFlags = GetPauseFlags();
+            if (curPauseFlags != prevPauseFlags) {
+                RE4MPPacket pausePkt;
+                memset(&pausePkt, 0, sizeof(pausePkt));
+                pausePkt.type = PKT_PAUSE_SYNC;
+                pausePkt.entityIndex = (uint16_t)(curPauseFlags & 0xFFFF);
+                pausePkt.hp = (int16_t)((curPauseFlags >> 16) & 0xFFFF);
+                SendPacket(&g_net, &pausePkt);
+                prevPauseFlags = curPauseFlags;
             }
 
             // --- Leon position (our player) ---
@@ -193,11 +232,15 @@ DWORD WINAPI MainThread(LPVOID param) {
                         sendPkt.pos[0] = myPos[0]; sendPkt.pos[1] = myPos[1]; sendPkt.pos[2] = myPos[2];
                         sendPkt.rot[0] = myRot[0]; sendPkt.rot[1] = myRot[1]; sendPkt.rot[2] = myRot[2];
                         sendPkt.hp = GetCEmHP(playerPtr);
+                        sendPkt.routine = GetCEmRoutine(playerPtr);
+                        sendPkt.animSeq = GetCEmAnimSeq(playerPtr);
+                        sendPkt.animFrame = GetCEmAnimFrame(playerPtr);
+                        sendPkt.animSpeed = GetCEmAnimSpeed(playerPtr);
                         SendPacket(&g_net, &sendPkt);
                     }
                 }
 
-                // --- Ashley state ---
+                // --- Ashley state (include HP now) ---
                 int* ashley = SubCharPointer();
                 if (ashley) {
                     __try {
@@ -210,13 +253,18 @@ DWORD WINAPI MainThread(LPVOID param) {
                         ashPkt.entityIndex = 0;
                         ashPkt.pos[0] = ashPos[0]; ashPkt.pos[1] = ashPos[1]; ashPkt.pos[2] = ashPos[2];
                         ashPkt.rot[0] = ashRot[0]; ashPkt.rot[1] = ashRot[1]; ashPkt.rot[2] = ashRot[2];
-                        ashPkt.hp = -1;
+                        ashPkt.hp = GetCEmHP(ashley);
+                        ashPkt.routine = GetCEmRoutine(ashley);
+                        ashPkt.animSeq = GetCEmAnimSeq(ashley);
+                        ashPkt.animFrame = GetCEmAnimFrame(ashley);
+                        ashPkt.animSpeed = GetCEmAnimSpeed(ashley);
                         SendPacket(&g_net, &ashPkt);
                     } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 }
             }
 
-            // --- Enemy/boss states (host only, throttled, same-room only) ---
+            // --- Enemy/boss states (HOST authoritative — only host sends position/anim) ---
+            // Client only sends HP damage reports (PKT_HP_DAMAGE / PKT_ENTITY_DEATH).
             // Batched into fewer UDP datagrams to reduce syscall + header overhead.
             static int entitySendFrame = 0;
             entitySendFrame++;
@@ -255,7 +303,6 @@ DWORD WINAPI MainThread(LPVOID param) {
                         emPkt->animSpeed = GetCEmAnimSpeed(em);
                         batch.count++;
 
-                        // Flush batch when full
                         if (batch.count >= MAX_BATCH_ENTITIES) {
                             SendBatchPacket(&g_net, &batch);
                             batch.count = 0;
@@ -263,14 +310,13 @@ DWORD WINAPI MainThread(LPVOID param) {
                     } __except(EXCEPTION_EXECUTE_HANDLER) {}
                 }
 
-                // Flush remaining
                 if (batch.count > 0) {
                     SendBatchPacket(&g_net, &batch);
                 }
             }
 
-            // --- Client: detect local enemy damage and report to host ---
-            if (!g_isHost && EntitySyncState_SameRoom(&syncState)) {
+            // --- Detect local enemy HP changes and report to remote ---
+            if (EntitySyncState_SameRoom(&syncState)) {
                 uint32_t emCount = GetEmCount();
                 for (uint32_t i = 0; i < emCount && i < MAX_SYNC_ENTITIES; i++) {
                     int* em = GetEmByIndex(i);
@@ -286,7 +332,6 @@ DWORD WINAPI MainThread(LPVOID param) {
                         int16_t currentHP = GetCEmHP(em);
 
                         if (syncState.prevEnemyHPValid[i]) {
-                            // HP decreased locally → report damage to host
                             if (currentHP < syncState.prevEnemyHP[i] && currentHP >= 0) {
                                 RE4MPPacket dmgPkt;
                                 memset(&dmgPkt, 0, sizeof(dmgPkt));
@@ -294,7 +339,27 @@ DWORD WINAPI MainThread(LPVOID param) {
                                 dmgPkt.entityType = IsBossId(id) ? ENT_BOSS : ENT_ENEMY;
                                 dmgPkt.entityIndex = (uint16_t)i;
                                 dmgPkt.hp = currentHP;
+                                // Include routine + anim so remote sees damage/die animation
+                                dmgPkt.routine = GetCEmRoutine(em);
+                                dmgPkt.animSeq = GetCEmAnimSeq(em);
+                                dmgPkt.animFrame = GetCEmAnimFrame(em);
+                                dmgPkt.animSpeed = GetCEmAnimSpeed(em);
                                 SendPacket(&g_net, &dmgPkt);
+                            }
+
+                            // Enemy died locally → notify remote
+                            if (currentHP <= 0 && syncState.prevEnemyHP[i] > 0) {
+                                RE4MPPacket deathPkt;
+                                memset(&deathPkt, 0, sizeof(deathPkt));
+                                deathPkt.type = PKT_ENTITY_DEATH;
+                                deathPkt.entityType = IsBossId(id) ? ENT_BOSS : ENT_ENEMY;
+                                deathPkt.entityIndex = (uint16_t)i;
+                                deathPkt.hp = 0;
+                                deathPkt.routine = GetCEmRoutine(em);
+                                deathPkt.animSeq = GetCEmAnimSeq(em);
+                                deathPkt.animFrame = GetCEmAnimFrame(em);
+                                deathPkt.animSpeed = GetCEmAnimSpeed(em);
+                                SendPacket(&g_net, &deathPkt);
                             }
                         }
 
@@ -320,12 +385,22 @@ DWORD WINAPI MainThread(LPVOID param) {
                     syncState.remoteRoomKnown = true;
                     break;
 
+                case PKT_PAUSE_SYNC:
+                {
+                    uint32_t remotePause = ((uint32_t)(uint16_t)recvPkt.hp << 16)
+                                         | (uint32_t)recvPkt.entityIndex;
+                    SetPauseFlags(remotePause);
+                    prevPauseFlags = remotePause;  // don't echo back
+                    break;
+                }
+
                 case PKT_POSITION:
                     // Remote player's Leon position → interpolate onto our Ashley
                     if (EntitySyncState_SameRoom(&syncState)) {
                         InterpState_SetTarget(&syncState.partnerInterp,
                             recvPkt.pos, recvPkt.rot, recvPkt.hp, 0);
-                        // Update detour destination (latest target, not interpolated)
+                        InterpState_SetAnim(&syncState.partnerInterp,
+                            recvPkt.routine, recvPkt.animSeq, recvPkt.animFrame, recvPkt.animSpeed);
                         playerTwoPos[0] = recvPkt.pos[0];
                         playerTwoPos[1] = recvPkt.pos[1];
                         playerTwoPos[2] = recvPkt.pos[2];
@@ -334,28 +409,23 @@ DWORD WINAPI MainThread(LPVOID param) {
 
                 case PKT_ENTITY_STATE:
                     if (recvPkt.entityType == ENT_PARTNER) {
-                        // Remote player's Ashley position — store
                         remoteAshleyPos[0] = recvPkt.pos[0];
                         remoteAshleyPos[1] = recvPkt.pos[1];
                         remoteAshleyPos[2] = recvPkt.pos[2];
                     }
                     else if ((recvPkt.entityType == ENT_ENEMY || recvPkt.entityType == ENT_BOSS)
                              && !g_isHost && EntitySyncState_SameRoom(&syncState)) {
-                        // Enemy/boss state from host → set interpolation target
+                        // Client receives authoritative enemy position/anim from host
                         uint32_t idx = recvPkt.entityIndex;
-                        if (idx < MAX_SYNC_ENTITIES) {
-                            // Validate entity type matches before accepting
-                            if (idx < GetEmCount()) {
-                                int* em = GetEmByIndex(idx);
-                                if (em && IsCEmValid(em)) {
-                                    uint8_t localId = GetCEmId(em);
-                                    bool localIsEnemy = IsEnemyId(localId) || IsBossId(localId);
-                                    if (localIsEnemy) {
-                                        InterpState_SetTarget(&syncState.enemyInterp[idx],
-                                            recvPkt.pos, recvPkt.rot, recvPkt.hp, localId);
-                                        InterpState_SetAnim(&syncState.enemyInterp[idx],
-                                            recvPkt.routine, recvPkt.animSeq, recvPkt.animFrame, recvPkt.animSpeed);
-                                    }
+                        if (idx < MAX_SYNC_ENTITIES && idx < GetEmCount()) {
+                            int* em = GetEmByIndex(idx);
+                            if (em && IsCEmValid(em)) {
+                                uint8_t localId = GetCEmId(em);
+                                if (IsEnemyId(localId) || IsBossId(localId)) {
+                                    InterpState_SetTarget(&syncState.enemyInterp[idx],
+                                        recvPkt.pos, recvPkt.rot, recvPkt.hp, localId);
+                                    InterpState_SetAnim(&syncState.enemyInterp[idx],
+                                        recvPkt.routine, recvPkt.animSeq, recvPkt.animFrame, recvPkt.animSpeed);
                                 }
                             }
                         }
@@ -363,13 +433,17 @@ DWORD WINAPI MainThread(LPVOID param) {
                     break;
 
                 case PKT_ENTITY_DEATH:
-                    if (!g_isHost && EntitySyncState_SameRoom(&syncState)) {
+                    if (EntitySyncState_SameRoom(&syncState)) {
                         uint32_t idx = recvPkt.entityIndex;
                         if (idx < GetEmCount()) {
                             int* em = GetEmByIndex(idx);
                             if (em && IsCEmValid(em)) {
                                 __try {
-                                    *(int16_t*)((DWORD)em + 0x324) = 0;
+                                    SetCEmHP(em, 0);
+                                    // Don't write routine/anim — the game engine will
+                                    // naturally transition to Die when it sees HP<=0.
+                                    // Writing routine directly corrupts the engine's
+                                    // internal state machine and causes crashes.
                                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
                             }
                         }
@@ -377,8 +451,7 @@ DWORD WINAPI MainThread(LPVOID param) {
                     break;
 
                 case PKT_HP_DAMAGE:
-                    // Client reports enemy damage — host applies minimum HP
-                    if (g_isHost && EntitySyncState_SameRoom(&syncState)) {
+                    if (EntitySyncState_SameRoom(&syncState)) {
                         uint32_t idx = recvPkt.entityIndex;
                         if (idx < GetEmCount()) {
                             int* em = GetEmByIndex(idx);
@@ -386,7 +459,12 @@ DWORD WINAPI MainThread(LPVOID param) {
                                 __try {
                                     int16_t localHP = GetCEmHP(em);
                                     if (recvPkt.hp < localHP && recvPkt.hp >= 0) {
-                                        *(int16_t*)((DWORD)em + 0x324) = recvPkt.hp;
+                                        SetCEmHP(em, recvPkt.hp);
+                                        // Don't write routine/anim — the game engine will
+                                        // naturally play the Damage/Die animation when it
+                                        // detects the HP drop. For host-authoritative enemies,
+                                        // the host's PKT_ENTITY_STATE will carry the correct
+                                        // routine/anim to the client via interpolation.
                                     }
                                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
                             }
@@ -417,19 +495,43 @@ DWORD WINAPI MainThread(LPVOID param) {
                     ashleyRot[1] = interpRot[1];
                     ashleyRot[2] = interpRot[2];
 
-                    // Update pos_old_110 to match current position so the engine
-                    // sees zero movement delta — prevents constant footstep sounds.
                     float* posOld = (float*)((DWORD)playerTwoPtr + 0x110);
                     posOld[0] = interpPos[0];
                     posOld[1] = interpPos[1];
                     posOld[2] = interpPos[2];
 
-                    // Zero the speed vector (cModel::speed_104) so the engine
-                    // doesn't infer velocity from AI locomotion.
                     float* speed = (float*)((DWORD)playerTwoPtr + 0x104);
                     speed[0] = 0.0f;
                     speed[1] = 0.0f;
                     speed[2] = 0.0f;
+
+                    // Sync remote player HP to Ashley
+                    if (syncState.partnerInterp.targetHP >= 0) {
+                        SetCEmHP(playerTwoPtr, syncState.partnerInterp.targetHP);
+                    }
+
+                    // Apply routine + animation state from remote player to Ashley
+                    if (syncState.partnerInterp.hasAnim) {
+                        uint8_t localRoutine = GetCEmRoutine(playerTwoPtr);
+                        bool routineChanged = (localRoutine != syncState.partnerInterp.routine);
+
+                        if (routineChanged) {
+                            SetCEmRoutine(playerTwoPtr, syncState.partnerInterp.routine);
+                        }
+
+                        int32_t localSeq = GetCEmAnimSeq(playerTwoPtr);
+                        if (routineChanged || localSeq != syncState.partnerInterp.animSeq) {
+                            SetCEmAnimSeq(playerTwoPtr, syncState.partnerInterp.animSeq);
+                            SetCEmAnimFrame(playerTwoPtr, syncState.partnerInterp.animFrame);
+                        } else {
+                            float localFrame = GetCEmAnimFrame(playerTwoPtr);
+                            float frameDiff = syncState.partnerInterp.animFrame - localFrame;
+                            if (frameDiff > 2.0f || frameDiff < -2.0f) {
+                                SetCEmAnimFrame(playerTwoPtr, syncState.partnerInterp.animFrame);
+                            }
+                        }
+                        SetCEmAnimSpeed(playerTwoPtr, syncState.partnerInterp.animSpeed);
+                    }
                 } __except(EXCEPTION_EXECUTE_HANDLER) {
                     playerTwoReady = false;
                     playerTwoPtr = nullptr;
@@ -437,7 +539,12 @@ DWORD WINAPI MainThread(LPVOID param) {
             }
         }
 
-        // --- Enemy interpolation (client only, same-room) ---
+        // --- Enemy interpolation (CLIENT only — host is authoritative) ---
+        // Host's game engine runs enemy AI natively. Client receives position
+        // and HP from host. We do NOT write routine/animation — the engine's
+        // internal state machine must manage those itself (writing r_no_0 from
+        // outside causes crashes). The client's local AI will play animations
+        // based on its own state, but position is corrected to match host.
         if (!g_isHost && EntitySyncState_SameRoom(&syncState)) {
             uint32_t emCount = GetEmCount();
             for (uint32_t i = 0; i < emCount && i < MAX_SYNC_ENTITIES; i++) {
@@ -448,6 +555,7 @@ DWORD WINAPI MainThread(LPVOID param) {
                 if (!em || !IsCEmValid(em)) continue;
 
                 __try {
+                    // Interpolate position smoothly
                     float interpPos[3], interpRot[3];
                     InterpState_GetCurrent(es, interpPos, interpRot);
 
@@ -456,29 +564,12 @@ DWORD WINAPI MainThread(LPVOID param) {
                     emPos[0] = interpPos[0]; emPos[1] = interpPos[1]; emPos[2] = interpPos[2];
                     emRot[0] = interpRot[0]; emRot[1] = interpRot[1]; emRot[2] = interpRot[2];
 
-                    // Apply HP (use minimum of local and remote)
+                    // Apply HP from host (use minimum so client damage also sticks)
                     if (es->targetHP >= 0) {
                         int16_t localHP = GetCEmHP(em);
                         if (es->targetHP < localHP) {
-                            *(int16_t*)((DWORD)em + 0x324) = es->targetHP;
+                            SetCEmHP(em, es->targetHP);
                         }
-                    }
-
-                    // Apply animation state from host
-                    if (es->hasAnim) {
-                        int32_t localSeq = GetCEmAnimSeq(em);
-                        if (localSeq != es->animSeq) {
-                            SetCEmAnimSeq(em, es->animSeq);
-                            SetCEmAnimFrame(em, es->animFrame);
-                        } else {
-                            // Same animation — nudge frame toward host's frame
-                            float localFrame = GetCEmAnimFrame(em);
-                            float frameDiff = es->animFrame - localFrame;
-                            if (frameDiff > 2.0f || frameDiff < -2.0f) {
-                                SetCEmAnimFrame(em, es->animFrame);
-                            }
-                        }
-                        SetCEmAnimSpeed(em, es->animSpeed);
                     }
                 } __except(EXCEPTION_EXECUTE_HANDLER) {}
             }

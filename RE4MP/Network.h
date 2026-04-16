@@ -11,8 +11,9 @@
 #define PKT_ENTITY_STATE  1  // Entity position + rotation (partner/enemy/boss)
 #define PKT_ENTITY_DEATH  2  // Entity killed notification
 #define PKT_ROOM_SYNC     3  // Room/area ID sync (entityIndex = roomId)
-#define PKT_HP_DAMAGE     4  // Client->host: enemy damage report (hp = current HP)
-#define PKT_MAX           4  // highest valid packet type
+#define PKT_HP_DAMAGE     4  // Enemy damage report (hp = current HP)
+#define PKT_PAUSE_SYNC    5  // Game pause state (entityIndex = pause flags)
+#define PKT_MAX           5  // highest valid packet type
 
 // Entity types (used in entityType field)
 #define ENT_PLAYER   0  // Leon (the local player)

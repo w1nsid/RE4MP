@@ -11,7 +11,6 @@ static int**   g_pPL  = NULL;   // -> cPlayer* (Leon)
 static int**   g_pAS  = NULL;   // -> cPlayer* (Ashley/subchar)
 static void*   g_pEmMgr = NULL; // -> cEmMgr
 static uint32_t* g_pGlobalWK = NULL; // -> GLOBAL_WK
-static uint16_t* g_pRoomId = NULL;   // -> current room/area ID (2 bytes)
 
 // Forward declaration for DbgLog (defined in RE4MP.cpp)
 extern void DbgLog(const char* fmt, ...);
@@ -46,10 +45,20 @@ int16_t GetCEmHP(int* cEmAddr)
     return *(int16_t*)((DWORD)cEmAddr + 0x324);  // cEm::hp_324
 }
 
+void SetCEmHP(int* cEmAddr, int16_t hp)
+{
+    *(int16_t*)((DWORD)cEmAddr + 0x324) = hp;
+}
+
 // Animation accessors — offsets from cModel/MOTION_INFO layout (re4_tweaks SDK)
 uint8_t GetCEmRoutine(int* cEmAddr)
 {
     return *(uint8_t*)((DWORD)cEmAddr + 0xFC);   // cModel::r_no_0_FC
+}
+
+void SetCEmRoutine(int* cEmAddr, uint8_t routine)
+{
+    *(uint8_t*)((DWORD)cEmAddr + 0xFC) = routine;
 }
 
 int32_t GetCEmAnimSeq(int* cEmAddr)
@@ -187,8 +196,42 @@ void ForceAshleyPresent()
 
 uint16_t GetLocalRoomId()
 {
-    if (!g_pRoomId) return 0;
-    return *g_pRoomId;
+    if (!g_pGlobalWK) return 0;
+    return *(uint16_t*)((uint8_t*)g_pGlobalWK + 0x4FAC);  // GLOBAL_WK::curRoomId_4FAC
+}
+
+// --- Pause state ---
+// flags_STOP_0_170: SPF_ bits that freeze different game subsystems.
+// The game's pause screen sets 0xBFFFFF7F (everything except SPF_ID_SYSTEM).
+
+uint32_t GetPauseFlags()
+{
+    if (!g_pGlobalWK) return 0;
+    return *(uint32_t*)((uint8_t*)g_pGlobalWK + 0x170);  // GLOBAL_WK::flags_STOP_0_170
+}
+
+void SetPauseFlags(uint32_t flags)
+{
+    if (!g_pGlobalWK) return;
+    *(uint32_t*)((uint8_t*)g_pGlobalWK + 0x170) = flags;
+}
+
+// --- Game state checks ---
+
+// Returns true when the game is in normal gameplay (Rno0 == MainLoop == 3).
+bool IsGameInMainLoop()
+{
+    if (!g_pGlobalWK) return false;
+    return *(uint8_t*)((uint8_t*)g_pGlobalWK + 0x20) == 3;  // Rno0_20 == MainLoop
+}
+
+// Returns true when the game is NOT in the middle of a room transition.
+// Safe to access entity pointers only when this returns true.
+bool IsGameStable()
+{
+    if (!g_pGlobalWK) return false;
+    uint8_t rno0 = *(uint8_t*)((uint8_t*)g_pGlobalWK + 0x20);
+    return (rno0 == 3);  // Only MainLoop is stable
 }
 
 void PatchBytes(DWORD addr, unsigned char* bytes, int len)
@@ -254,65 +297,52 @@ bool SigScanResolve()
     return g_sigsResolved;
 }
 
-// Fallback: use hardcoded v1.0.6 offsets if sigs fail
-void HookFunctions_v106(DWORD base_addr)
-{
-    DbgLog("[RE4MP] Using hardcoded v1.0.6 offsets as fallback\n");
-
-    if (!g_pPL)       g_pPL       = (int**)(base_addr + 0x857054);
-    if (!g_pAS)       g_pAS       = (int**)(base_addr + 0x857060);
-    if (!g_pEmMgr)    g_pEmMgr    = (void*)(base_addr + 0x7fDB04);
-    if (!g_pGlobalWK) g_pGlobalWK = *(uint32_t**)(base_addr + 0x855A40);
-    if (!g_pRoomId)   g_pRoomId   = (uint16_t*)(base_addr + 0x85BE90);
-
-    if (!RouteCkToPos)
-        RouteCkToPos = (fn_RouteCkToPos)(base_addr + 0x02B2950);
-}
-
 void HookFunctions(DWORD base_addr)
 {
     DbgLog("[SIG] Starting signature scan...\n");
     bool ok = SigScanResolve();
 
     if (!ok) {
-        HookFunctions_v106(base_addr);
+        DbgLog("[RE4MP] ERROR: Signature scan failed — cannot resolve game pointers\n");
+        DbgLog("[RE4MP] Only v1.1.0+ is supported\n");
     }
 }
 
-void CodeInjection(DWORD base_addr)
+// Prevent enemy AI from targeting Ashley for pickup/carry.
+// Sets cEm10::Sub_pos_450 far away and l_sub distances high so
+// enemies never attempt the grab action — fixes desync between
+// host and client caused by differing AI pickup decisions.
+void DisableEnemyAshleyPickup()
 {
-    unsigned char twoNop[2] = { 0x90, 0x90 };
-    unsigned char threeNop[3] = { 0x90, 0x90, 0x90 };
-    unsigned char fiveNop[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
-    unsigned char sixNop[6] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    if (!g_pEmMgr) return;
+    uint32_t count = GetEmCount();
+    uint32_t blockSize = GetEmBlockSize();
 
-    // These NOP patches disable AI movement code for the partner character.
-    // On v1.1.0 these offsets may differ — we skip patching if sig scan succeeded
-    // and the game is NOT v1.0.6. We detect v1.0.6 by checking if pPL has the
-    // known static address.
-    DWORD ba = base_addr;
-    bool is_v106 = ((DWORD)g_pPL == (ba + 0x857054));
+    for (uint32_t i = 0; i < count && i < MAX_SYNC_ENTITIES; i++) {
+        int* em = GetEmByIndex(i);
+        if (!em || !IsCEmValid(em)) continue;
 
-    if (is_v106) {
-        DbgLog("[RE4MP] Applying v1.0.6 NOP patches\n");
+        uint8_t id = GetCEmId(em);
+        if (!IsEnemyId(id) && !IsBossId(id)) continue;
 
-        // Disable Luis partner set and move
-        PatchBytes((ba + 0x4e8a41), sixNop, 6);
+        __try {
+            // cEm::l_sub_37C — distance to subchar (all entity types)
+            *(float*)((DWORD)em + 0x37C) = 99999.0f;
 
-        // Disable cSubChar setting partner location for movement
-        PatchBytes((ba + 0x35e9fa), twoNop, 2);
-        PatchBytes((ba + 0x35ea02), threeNop, 3);
-        PatchBytes((ba + 0x35ea0b), threeNop, 3);
-        PatchBytes((ba + 0x35e9cb), twoNop, 2);
-        PatchBytes((ba + 0x35e9cd), threeNop, 3);
-        PatchBytes((ba + 0x35e9d0), threeNop, 3);
-        PatchBytes((ba + 0x35eb4c), fiveNop, 5);
-        PatchBytes((ba + 0x35e9df), fiveNop, 5);
-        PatchBytes((ba + 0x35eb00), fiveNop, 5);
+            // cEm10-specific fields (only safe when blockSize >= cEm10 size)
+            if (blockSize >= 0x690) {
+                // cEm10::Sub_pos_450 — cached Ashley position used by AI
+                float* subPos = (float*)((DWORD)em + 0x450);
+                subPos[0] = 99999.0f;
+                subPos[1] = 99999.0f;
+                subPos[2] = 99999.0f;
 
-        // spawn subChar everywhere
-        PatchBytes((ba + 0x2c520b), twoNop, 2);
-    } else {
-        DbgLog("[RE4MP] Non-v1.0.6 detected — skipping NOP patches (sig-scan handles hooks)\n");
+                // cEm10::L_sub_684 — computed distance to subchar
+                *(float*)((DWORD)em + 0x684) = 99999.0f;
+
+                // cEm10::L_sub_route_698 — route distance to subchar
+                *(float*)((DWORD)em + 0x698) = 99999.0f;
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 }
