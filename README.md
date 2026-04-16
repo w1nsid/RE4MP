@@ -2,7 +2,7 @@
 
 A multiplayer mod for **Resident Evil 4** (2005 PC) that lets two players share the same game world over the internet. Each player's Leon is mirrored as a partner character (Ashley) on the other player's screen. A lightweight UDP relay server forwards position packets between the two clients. No VPN or Hamachi required.
 
-Works with both **v1.06** and **v1.1.0** of the game — no downgrade needed.
+Works with both **v1.06** and **v1.1.0** of the game.
 
 ## How It Works
 

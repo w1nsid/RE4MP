@@ -15,23 +15,33 @@ int main(int argc, char* argv[]) {
 	if (lastSlash) *(lastSlash + 1) = '\0';
 	strcat_s(DllPath, MAX_PATH, "RE4MP.dll");
 
-	// Allow override via command line argument
-	if (argc > 1) {
-		strncpy_s(DllPath, MAX_PATH, argv[1], _TRUNCATE);
-	}
-
-	HWND hwnd = FindWindowA(NULL, "Resident Evil 4");
-	if (hwnd == NULL) {
-		cerr << "Error: Resident Evil 4 window not found. Is the game running?" << endl;
-		return 1;
-	}
-
 	DWORD procID = 0;
-	GetWindowThreadProcessId(hwnd, &procID);
-	if (procID == 0) {
-		cerr << "Error: Could not get process ID." << endl;
-		return 1;
+
+	// Parse arguments: [--pid <PID>] [dllpath]
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
+			procID = (DWORD)atoi(argv[++i]);
+		} else {
+			strncpy_s(DllPath, MAX_PATH, argv[i], _TRUNCATE);
+		}
 	}
+
+	if (procID == 0) {
+		// Fall back to finding the window by title
+		HWND hwnd = FindWindowA(NULL, "Resident Evil 4");
+		if (hwnd == NULL) {
+			cerr << "Error: Resident Evil 4 window not found. Is the game running?" << endl;
+			cerr << "  Tip: Use --pid <PID> to target a specific process." << endl;
+			return 1;
+		}
+		GetWindowThreadProcessId(hwnd, &procID);
+		if (procID == 0) {
+			cerr << "Error: Could not get process ID." << endl;
+			return 1;
+		}
+	}
+
+	cout << "Target PID: " << procID << endl;
 
 	HANDLE handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
 	if (handle == NULL) {
