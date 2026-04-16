@@ -99,8 +99,8 @@ jobs:
             - name: Prepare release files
               run: |
                   mkdir -p release
-                  cp artifacts/windows-artifacts/build/RE4MP-client.zip release/RE4MP-${{ github.ref_name }}.zip
-                  cp artifacts/windows-artifacts/build/RE4MPServer.exe release/RE4MPServer.exe
+                  cp artifacts/windows-artifacts/RE4MP-client.zip release/RE4MP-${{ github.ref_name }}.zip
+                  cp artifacts/windows-artifacts/RE4MPServer.exe release/RE4MPServer.exe
                   cp artifacts/linux-artifacts/re4mp-server release/re4mp-server
                   chmod +x release/re4mp-server
 
