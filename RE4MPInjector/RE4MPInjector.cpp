@@ -43,9 +43,15 @@ int main(int argc, char* argv[]) {
 	if (lastSlash) *(lastSlash + 1) = '\0';
 	strcat_s(DllPath, MAX_PATH, "RE4MP.dll");
 
-	// Allow override via command line argument
-	if (argc > 1) {
-		strncpy_s(DllPath, MAX_PATH, argv[1], _TRUNCATE);
+	DWORD procID = 0;
+
+	// Parse arguments: [--pid <PID>] [dllpath]
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
+			procID = (DWORD)atoi(argv[++i]);
+		} else {
+			strncpy_s(DllPath, MAX_PATH, argv[i], _TRUNCATE);
+		}
 	}
 
 	// Check DLL exists before doing anything
@@ -70,46 +76,48 @@ int main(int argc, char* argv[]) {
 		cerr << "The mod will use default settings (127.0.0.1:27015)." << endl << endl;
 	}
 
-	// Find the game - try window title first, then fall back to process name
-	cout << "Looking for Resident Evil 4..." << endl;
-	DWORD procID = 0;
+	if (procID == 0) {
+		// Find the game - try window title first, then fall back to process name
+		cout << "Looking for Resident Evil 4..." << endl;
 
-	// Try common window titles
-	const char* windowTitles[] = {
-		"Resident Evil 4",
-		"RESIDENT EVIL 4",
-		"resident evil 4",
-		"Biohazard 4",
-		"BIOHAZARD 4",
-		NULL
-	};
-	for (int i = 0; windowTitles[i] != NULL; i++) {
-		HWND hwnd = FindWindowA(NULL, windowTitles[i]);
-		if (hwnd != NULL) {
-			GetWindowThreadProcessId(hwnd, &procID);
-			if (procID != 0) {
-				cout << "Found window: \"" << windowTitles[i] << "\"" << endl;
-				break;
+		// Try common window titles
+		const char* windowTitles[] = {
+			"Resident Evil 4",
+			"RESIDENT EVIL 4",
+			"resident evil 4",
+			"Biohazard 4",
+			"BIOHAZARD 4",
+			NULL
+		};
+		for (int i = 0; windowTitles[i] != NULL; i++) {
+			HWND hwnd = FindWindowA(NULL, windowTitles[i]);
+			if (hwnd != NULL) {
+				GetWindowThreadProcessId(hwnd, &procID);
+				if (procID != 0) {
+					cout << "Found window: \"" << windowTitles[i] << "\"" << endl;
+					break;
+				}
 			}
 		}
-	}
 
-	// Fallback: search by process name
-	if (procID == 0) {
-		const char* exeNames[] = { "bio4.exe", "Bio4.exe", "BIO4.EXE", NULL };
-		for (int i = 0; exeNames[i] != NULL; i++) {
-			procID = find_process(exeNames[i]);
-			if (procID != 0) {
-				cout << "Found process: " << exeNames[i] << endl;
-				break;
+		// Fallback: search by process name
+		if (procID == 0) {
+			const char* exeNames[] = { "bio4.exe", "Bio4.exe", "BIO4.EXE", NULL };
+			for (int i = 0; exeNames[i] != NULL; i++) {
+				procID = find_process(exeNames[i]);
+				if (procID != 0) {
+					cout << "Found process: " << exeNames[i] << endl;
+					break;
+				}
 			}
 		}
-	}
 
-	if (procID == 0) {
-		cerr << "Error: Resident Evil 4 not found!" << endl;
-		cerr << "Make sure the game is running before launching the injector." << endl;
-		pause_exit(1);
+		if (procID == 0) {
+			cerr << "Error: Resident Evil 4 not found!" << endl;
+			cerr << "Make sure the game is running before launching the injector." << endl;
+			cerr << "  Tip: Use --pid <PID> to target a specific process." << endl;
+			pause_exit(1);
+		}
 	}
 	cout << "Process ID: " << procID << endl;
 
