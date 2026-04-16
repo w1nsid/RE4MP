@@ -10,7 +10,9 @@
 #define PKT_POSITION      0  // Leon position + rotation
 #define PKT_ENTITY_STATE  1  // Entity position + rotation (partner/enemy/boss)
 #define PKT_ENTITY_DEATH  2  // Entity killed notification
-#define PKT_MAX           2  // highest valid packet type
+#define PKT_ROOM_SYNC     3  // Room/area ID sync (entityIndex = roomId)
+#define PKT_HP_DAMAGE     4  // Client->host: enemy damage report (hp = current HP)
+#define PKT_MAX           4  // highest valid packet type
 
 // Entity types (used in entityType field)
 #define ENT_PLAYER   0  // Leon (the local player)
@@ -27,6 +29,18 @@ struct RE4MPPacket {
     float    rot[3];      // pitch, yaw, roll rotation (cCoord::ang_A0)
     int16_t  hp;          // entity HP (cEm::hp_324), -1 if unused
     uint32_t seq;         // sequence number
+    // Animation sync fields
+    uint8_t  routine;     // cModel::r_no_0_FC (Init/Move/Damage/Die)
+    int32_t  animSeq;     // MOTION_INFO::Seq (current animation sequence)
+    float    animFrame;   // MOTION_INFO::Mot_frame (current frame)
+    float    animSpeed;   // MOTION_INFO::Seq_speed (playback speed)
+};
+
+// Batched packet: multiple entities in one UDP datagram
+#define MAX_BATCH_ENTITIES 32
+struct RE4MPBatchPacket {
+    uint8_t  count;       // number of entity entries (1..MAX_BATCH_ENTITIES)
+    RE4MPPacket entries[MAX_BATCH_ENTITIES];
 };
 #pragma pack(pop)
 
@@ -82,6 +96,12 @@ inline bool InitNetwork(RE4MPNetwork* net, RE4MPConfig* config)
     }
 
     net->initialized = true;
+
+    // Enlarge socket buffers to handle packet bursts
+    int bufSize = 65536;
+    setsockopt(net->sock, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+    setsockopt(net->sock, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+
     return true;
 }
 
@@ -95,29 +115,82 @@ inline void SendPacket(RE4MPNetwork* net, RE4MPPacket* pkt)
            (sockaddr*)&net->serverAddr, sizeof(net->serverAddr));
 }
 
-// Returns true if a packet was received
+inline void SendBatchPacket(RE4MPNetwork* net, RE4MPBatchPacket* batch)
+{
+    if (!net->initialized || batch->count == 0)
+        return;
+
+    // Assign sequence numbers to all entries
+    for (uint8_t i = 0; i < batch->count; i++) {
+        batch->entries[i].seq = ++net->sendSeq;
+    }
+
+    // Send only the used portion: 1 byte count + count * sizeof(RE4MPPacket)
+    int sendSize = 1 + batch->count * (int)sizeof(RE4MPPacket);
+    sendto(net->sock, (const char*)batch, sendSize, 0,
+           (sockaddr*)&net->serverAddr, sizeof(net->serverAddr));
+}
+
+// --- Batch receive queue (file-level statics) ---
+static RE4MPPacket g_batchQueue[MAX_BATCH_ENTITIES];
+static int g_batchQueueHead = 0;
+static int g_batchQueueCount = 0;
+
+// Returns true if a packet was received.
+// Accepts all valid packets — no global sequence filtering.
+// Different entity types send at different rates so a single sequence
+// counter was incorrectly dropping valid packets from other streams.
 inline bool RecvPacket(RE4MPNetwork* net, RE4MPPacket* pkt)
 {
     if (!net->initialized)
         return false;
 
+    // First, drain any remaining entries from a previous batch
+    if (g_batchQueueHead < g_batchQueueCount) {
+        memcpy(pkt, &g_batchQueue[g_batchQueueHead++], sizeof(RE4MPPacket));
+        return true;
+    }
+
     sockaddr_in fromAddr;
     int fromLen = sizeof(fromAddr);
-    int result = recvfrom(net->sock, (char*)pkt, sizeof(RE4MPPacket), 0,
+
+    static uint8_t recvBuf[sizeof(RE4MPBatchPacket)];
+    int result = recvfrom(net->sock, (char*)recvBuf, sizeof(recvBuf), 0,
                           (sockaddr*)&fromAddr, &fromLen);
 
+    if (result <= 0)
+        return false;
+
+    // Single packet
     if (result == sizeof(RE4MPPacket)) {
-        // Validate packet type
+        memcpy(pkt, recvBuf, sizeof(RE4MPPacket));
         if (pkt->type > PKT_MAX)
             return false;
-
-        // Drop stale out-of-order packets (but allow seq wraparound)
-        if (pkt->seq <= net->lastRecvSeq && (net->lastRecvSeq - pkt->seq) < 1000) {
-            return false;
-        }
-        net->lastRecvSeq = pkt->seq;
-
         return true;
+    }
+
+    // Batch packet: first byte is count, remainder is array of RE4MPPacket
+    if (result > 1) {
+        uint8_t count = recvBuf[0];
+        int expectedSize = 1 + count * (int)sizeof(RE4MPPacket);
+        if (count > 0 && count <= MAX_BATCH_ENTITIES && result == expectedSize) {
+            RE4MPPacket* entries = (RE4MPPacket*)(recvBuf + 1);
+
+            // Queue entries [1..count-1] for subsequent RecvPacket calls
+            g_batchQueueCount = 0;
+            g_batchQueueHead = 0;
+            for (uint8_t i = 1; i < count; i++) {
+                if (entries[i].type <= PKT_MAX) {
+                    g_batchQueue[g_batchQueueCount++] = entries[i];
+                }
+            }
+
+            // Return entries[0] immediately
+            if (entries[0].type <= PKT_MAX) {
+                memcpy(pkt, &entries[0], sizeof(RE4MPPacket));
+                return true;
+            }
+        }
     }
 
     return false;

@@ -11,6 +11,7 @@ static int**   g_pPL  = NULL;   // -> cPlayer* (Leon)
 static int**   g_pAS  = NULL;   // -> cPlayer* (Ashley/subchar)
 static void*   g_pEmMgr = NULL; // -> cEmMgr
 static uint32_t* g_pGlobalWK = NULL; // -> GLOBAL_WK
+static uint16_t* g_pRoomId = NULL;   // -> current room/area ID (2 bytes)
 
 // Forward declaration for DbgLog (defined in RE4MP.cpp)
 extern void DbgLog(const char* fmt, ...);
@@ -43,6 +44,42 @@ float* GetCEmRot(int* cEmAddr)
 int16_t GetCEmHP(int* cEmAddr)
 {
     return *(int16_t*)((DWORD)cEmAddr + 0x324);  // cEm::hp_324
+}
+
+// Animation accessors — offsets from cModel/MOTION_INFO layout (re4_tweaks SDK)
+uint8_t GetCEmRoutine(int* cEmAddr)
+{
+    return *(uint8_t*)((DWORD)cEmAddr + 0xFC);   // cModel::r_no_0_FC
+}
+
+int32_t GetCEmAnimSeq(int* cEmAddr)
+{
+    return *(int32_t*)((DWORD)cEmAddr + 0x284);  // Motion_1D8 + Seq_AC
+}
+
+float GetCEmAnimFrame(int* cEmAddr)
+{
+    return *(float*)((DWORD)cEmAddr + 0x1FC);    // Motion_1D8 + Mot_frame_24
+}
+
+float GetCEmAnimSpeed(int* cEmAddr)
+{
+    return *(float*)((DWORD)cEmAddr + 0x298);    // Motion_1D8 + Seq_speed_C0
+}
+
+void SetCEmAnimSeq(int* cEmAddr, int32_t seq)
+{
+    *(int32_t*)((DWORD)cEmAddr + 0x284) = seq;
+}
+
+void SetCEmAnimFrame(int* cEmAddr, float frame)
+{
+    *(float*)((DWORD)cEmAddr + 0x1FC) = frame;
+}
+
+void SetCEmAnimSpeed(int* cEmAddr, float speed)
+{
+    *(float*)((DWORD)cEmAddr + 0x298) = speed;
 }
 
 uint8_t GetCEmId(int* cEmAddr)
@@ -148,6 +185,12 @@ void ForceAshleyPresent()
     *(uint8_t*)((uint8_t*)g_pGlobalWK + 0x4FCB) = 2;
 }
 
+uint16_t GetLocalRoomId()
+{
+    if (!g_pRoomId) return 0;
+    return *g_pRoomId;
+}
+
 void PatchBytes(DWORD addr, unsigned char* bytes, int len)
 {
     DWORD oldProtect;
@@ -220,6 +263,7 @@ void HookFunctions_v106(DWORD base_addr)
     if (!g_pAS)       g_pAS       = (int**)(base_addr + 0x857060);
     if (!g_pEmMgr)    g_pEmMgr    = (void*)(base_addr + 0x7fDB04);
     if (!g_pGlobalWK) g_pGlobalWK = *(uint32_t**)(base_addr + 0x855A40);
+    if (!g_pRoomId)   g_pRoomId   = (uint16_t*)(base_addr + 0x85BE90);
 
     if (!RouteCkToPos)
         RouteCkToPos = (fn_RouteCkToPos)(base_addr + 0x02B2950);

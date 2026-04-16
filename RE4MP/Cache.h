@@ -1,6 +1,7 @@
 #pragma once
 #include "Config.h"
 #include "Network.h"
+#include "EntitySync.h"
 
 DWORD base_addr;
 

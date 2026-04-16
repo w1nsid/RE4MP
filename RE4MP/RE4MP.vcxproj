@@ -157,6 +157,7 @@
   <ItemGroup>
     <ClInclude Include="Cache.h" />
     <ClInclude Include="Config.h" />
+    <ClInclude Include="EntitySync.h" />
     <ClInclude Include="Network.h" />
     <ClInclude Include="detours.h" />
     <ClInclude Include="hooks.h" />
