@@ -47,13 +47,22 @@ struct RE4MPPacket {
     float    rot[3];
     int16_t  hp;
     uint32_t seq;
+    uint8_t  routine;
+    int32_t  animSeq;
+    float    animFrame;
+    float    animSpeed;
 };
 #pragma pack(pop)
+
+#define MAX_BATCH_ENTITIES 32
+#define MAX_RECV_BUF (1 + MAX_BATCH_ENTITIES * (int)sizeof(struct RE4MPPacket))
 
 #define PKT_POSITION      0
 #define PKT_ENTITY_STATE  1
 #define PKT_ENTITY_DEATH  2
-#define PKT_MAX           2
+#define PKT_ROOM_SYNC     3
+#define PKT_HP_DAMAGE     4
+#define PKT_MAX           4
 
 #define MAX_CLIENTS        2
 #define CLIENT_TIMEOUT_SEC 30
@@ -114,6 +123,16 @@ int main(int argc, char* argv[])
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
 
+    /* Enlarge socket buffers for packet bursts */
+    int bufSize = 65536;
+#ifdef _WIN32
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSize, sizeof(bufSize));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSize, sizeof(bufSize));
+#else
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &bufSize, sizeof(bufSize));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufSize, sizeof(bufSize));
+#endif
+
     struct sockaddr_in bind_addr;
     memset(&bind_addr, 0, sizeof(bind_addr));
     bind_addr.sin_family = AF_INET;
@@ -125,6 +144,19 @@ int main(int argc, char* argv[])
         closesocket(sock);
         return 1;
     }
+
+    /* Set non-blocking so the drain loop doesn't block on recvfrom */
+#ifdef _WIN32
+    {
+        unsigned long nbMode = 1;
+        ioctlsocket(sock, FIONBIO, &nbMode);
+    }
+#else
+    {
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    }
+#endif
 
     printf("========================================\n");
     printf("  RE4MP Server v%s\n", RE4MP_VERSION);
@@ -138,7 +170,7 @@ int main(int argc, char* argv[])
     struct Client clients[MAX_CLIENTS];
     memset(clients, 0, sizeof(clients));
 
-    struct RE4MPPacket pkt;
+    uint8_t recvBuf[MAX_RECV_BUF];
     struct sockaddr_in from_addr;
 
     while (g_running) {
@@ -172,66 +204,63 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        socklen_t from_len = sizeof(from_addr);
-        int received = recvfrom(sock, (char*)&pkt, sizeof(pkt), 0,
-                                (struct sockaddr*)&from_addr, &from_len);
+        /* Drain ALL queued datagrams (not just one per select cycle) */
+        while (1) {
+            socklen_t from_len = sizeof(from_addr);
+            int received = recvfrom(sock, (char*)recvBuf, sizeof(recvBuf), 0,
+                                    (struct sockaddr*)&from_addr, &from_len);
 
-        if (received != (int)sizeof(pkt)) {
-            /* Ignore malformed packets */
-            continue;
-        }
-
-        /* Validate packet type */
-        if (pkt.type > PKT_MAX) {
-            continue;
-        }
-
-        /* Find which client slot this came from */
-        int sender = -1;
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i].active && addr_equal(&clients[i].addr, &from_addr)) {
-                sender = i;
-                clients[i].last_seen = time(NULL);
-                break;
+            if (received <= 0) {
+                break; /* no more pending */
             }
-        }
 
-        /* Register new client if we have a free slot */
-        if (sender < 0) {
+            /* Find which client slot this came from */
+            int sender = -1;
             for (int i = 0; i < MAX_CLIENTS; i++) {
-                if (!clients[i].active) {
-                    clients[i].addr = from_addr;
-                    clients[i].active = 1;
-                    clients[i].last_seen = time(NULL);
+                if (clients[i].active && addr_equal(&clients[i].addr, &from_addr)) {
                     sender = i;
-
-                    char ip_str[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &from_addr.sin_addr, ip_str, sizeof(ip_str));
-                    printf("Client %d connected: %s:%d\n",
-                           i + 1, ip_str, ntohs(from_addr.sin_port));
-                    fflush(stdout);
-
-                    if (clients[0].active && clients[1].active) {
-                        printf("Both clients connected. Relaying packets.\n");
-                        fflush(stdout);
-                    }
+                    clients[i].last_seen = time(NULL);
                     break;
                 }
             }
-        }
 
-        /* Unknown sender and no free slots — drop */
-        if (sender < 0) {
-            continue;
-        }
+            /* Register new client if we have a free slot */
+            if (sender < 0) {
+                for (int i = 0; i < MAX_CLIENTS; i++) {
+                    if (!clients[i].active) {
+                        clients[i].addr = from_addr;
+                        clients[i].active = 1;
+                        clients[i].last_seen = time(NULL);
+                        sender = i;
 
-        /* Forward packet to the OTHER client */
-        int other = 1 - sender;
-        if (clients[other].active) {
-            sendto(sock, (const char*)&pkt, sizeof(pkt), 0,
-                   (struct sockaddr*)&clients[other].addr,
-                   sizeof(clients[other].addr));
-        }
+                        char ip_str[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &from_addr.sin_addr, ip_str, sizeof(ip_str));
+                        printf("Client %d connected: %s:%d\n",
+                               i + 1, ip_str, ntohs(from_addr.sin_port));
+                        fflush(stdout);
+
+                        if (clients[0].active && clients[1].active) {
+                            printf("Both clients connected. Relaying packets.\n");
+                            fflush(stdout);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            /* Unknown sender and no free slots — drop */
+            if (sender < 0) {
+                continue;
+            }
+
+            /* Forward the raw datagram to the OTHER client (works for single + batch) */
+            int other = 1 - sender;
+            if (clients[other].active) {
+                sendto(sock, (const char*)recvBuf, received, 0,
+                       (struct sockaddr*)&clients[other].addr,
+                       sizeof(clients[other].addr));
+            }
+        } /* end drain loop */
     }
 
     printf("\nServer shutting down.\n");
