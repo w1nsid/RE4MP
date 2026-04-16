@@ -6,9 +6,13 @@
 #include <tlhelp32.h>
 using namespace std;
 
+static bool g_scripted = false;
+
 static void pause_exit(int code) {
-	cout << endl << "Press Enter to exit..." << endl;
-	cin.get();
+	if (!g_scripted) {
+		cout << endl << "Press Enter to exit..." << endl;
+		cin.get();
+	}
 	exit(code);
 }
 
@@ -49,6 +53,7 @@ int main(int argc, char* argv[]) {
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
 			procID = (DWORD)atoi(argv[++i]);
+			g_scripted = true;
 		} else {
 			strncpy_s(DllPath, MAX_PATH, argv[i], _TRUNCATE);
 		}
@@ -120,6 +125,20 @@ int main(int argc, char* argv[]) {
 		}
 	}
 	cout << "Process ID: " << procID << endl;
+
+	// Enable SeDebugPrivilege so we can inject into processes in other sessions
+	{
+		HANDLE hToken = NULL;
+		if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+			TOKEN_PRIVILEGES tp;
+			tp.PrivilegeCount = 1;
+			tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+			if (LookupPrivilegeValueA(NULL, "SeDebugPrivilege", &tp.Privileges[0].Luid)) {
+				AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+			}
+			CloseHandle(hToken);
+		}
+	}
 
 	HANDLE handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
 	if (handle == NULL) {
